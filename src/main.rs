@@ -4,6 +4,8 @@ mod app;
 mod card;
 mod images;
 mod png;
+mod settings;
+mod tavern;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,7 +38,8 @@ fn usage() -> &'static str {
 }
 
 fn main() -> eframe::Result {
-    i18n::init();
+    let (settings, warning) = settings::Settings::load();
+    i18n::init(settings.lang.as_deref());
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("-h" | "--help") => {
@@ -72,7 +75,7 @@ fn main() -> eframe::Result {
         Box::new(move |cc| {
             setup_fonts(&cc.egui_ctx);
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(app::App::new(cc, initial)))
+            Ok(Box::new(app::App::new(cc, settings, warning, initial)))
         }),
     )
 }
@@ -124,6 +127,34 @@ fn print_info(path: &Path) -> i32 {
     if !d.extra.is_empty() {
         let keys = d.extra.keys().cloned().collect::<Vec<_>>().join(", ");
         println!("{}", trf!("  其他字段：{keys}", "  Other fields: {keys}"));
+    }
+    let (settings, _) = settings::Settings::load();
+    println!(
+        "\n{}",
+        trf!("图片文件夹：{}", "Image folder: {}", images::card_dir(&settings.image_root(), &d.name).display())
+    );
+    match tavern::detect(settings.tavern_dir.as_deref()) {
+        None => println!("{}", tr!("酒馆：未找到", "SillyTavern: not found")),
+        Some(t) => {
+            let user =
+                settings.tavern_user.clone().filter(|u| t.users.contains(u)).unwrap_or_else(|| t.users[0].clone());
+            if let Some(g) = t.gallery_target(&user, &d.name) {
+                let why = match g.source {
+                    tavern::FolderSource::Override => tr!("自定义文件夹", "custom folder"),
+                    tavern::FolderSource::Character => tr!("已导入，按角色名", "imported, by name"),
+                    tavern::FolderSource::NotImported => tr!("尚未导入，按角色名", "not imported yet, by name"),
+                };
+                let avatar = g.avatar.map(|a| format!(" ← {a}")).unwrap_or_default();
+                println!(
+                    "{}",
+                    trf!(
+                        "酒馆 Gallery：{}（{why}{avatar}）",
+                        "SillyTavern gallery: {} ({why}{avatar})",
+                        g.dir.display()
+                    )
+                );
+            }
+        }
     }
     let refs = images::scan_card(d);
     println!("\n{}", trf!("图片链接：{} 个", "Image links: {}", refs.len()));

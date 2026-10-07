@@ -4,7 +4,6 @@
 //! `trf!("共 {n} 个", "{n} total")` 走 `format!` 返回 `String`。
 //! 当前语言是全局状态，GUI 切换后下一帧就会全部重绘成新语言。
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static ENGLISH: AtomicBool = AtomicBool::new(false);
@@ -25,14 +24,14 @@ impl Lang {
         }
     }
 
-    fn code(self) -> &'static str {
+    pub fn code(self) -> &'static str {
         match self {
             Lang::Zh => "zh",
             Lang::En => "en",
         }
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim().to_ascii_lowercase();
         if s.starts_with("zh") {
             Some(Lang::Zh)
@@ -57,24 +56,14 @@ pub fn set(lang: Lang) {
 }
 
 /// 优先级：环境变量 CARD_FORGE_LANG > 上次在界面里的选择 > 系统语言 > English。
-pub fn init() {
-    let saved = || std::fs::read_to_string(config_path()?).ok().and_then(|s| Lang::parse(&s));
+pub fn init(saved: Option<&str>) {
     let lang = std::env::var("CARD_FORGE_LANG")
         .ok()
         .and_then(|s| Lang::parse(&s))
-        .or_else(saved)
+        .or_else(|| saved.and_then(Lang::parse))
         .or_else(system_lang)
         .unwrap_or(Lang::En);
     set(lang);
-}
-
-/// 记住界面里选择的语言。
-pub fn save(lang: Lang) {
-    let Some(path) = config_path() else { return };
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(path, lang.code());
 }
 
 fn system_lang() -> Option<Lang> {
@@ -83,10 +72,6 @@ fn system_lang() -> Option<Lang> {
         .filter_map(|v| std::env::var(v).ok())
         .find(|v| !v.is_empty())
         .map(|v| if v.starts_with("zh") { Lang::Zh } else { Lang::En })
-}
-
-fn config_path() -> Option<PathBuf> {
-    Some(dirs::config_dir()?.join("card-forge").join("lang"))
 }
 
 macro_rules! tr {

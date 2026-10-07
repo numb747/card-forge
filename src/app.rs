@@ -6,6 +6,8 @@ use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, RichText, Ve
 use crate::card::{self, BookEntry, CardData, CharacterBook, ChunkInfo};
 use crate::i18n::{self, Lang, tr, trf};
 use crate::images::{self, DlState, Downloader, ImageRef};
+use crate::settings::Settings;
+use crate::tavern::{self, FolderSource, GalleryTarget, Tavern};
 
 const SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -49,7 +51,16 @@ pub struct App {
     tab: Tab,
     status: String,
 
-    cache_dir: PathBuf,
+    settings: Settings,
+    show_settings: bool,
+    tavern: Option<Tavern>,
+    /// (角色名, 用户目录) → Gallery 目标，名字或用户变化时重新计算。
+    gallery: Option<(String, PathBuf, Option<GalleryTarget>)>,
+    /// 图片库根目录（来自设置，缓存起来避免每帧读取 user-dirs）。
+    image_root: PathBuf,
+    /// 当前卡片的图片文件夹。在载入时按角色名确定；改名后要等保存才跟着改，
+    /// 避免边输入边切换文件夹、正在进行的下载落到别处。
+    image_dir: PathBuf,
     refs: Vec<ImageRef>,
     states: HashMap<String, DlState>,
     downloader: Downloader,
@@ -69,8 +80,14 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, initial: Option<PathBuf>) -> Self {
-        let cache_dir = images::cache_dir();
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        settings: Settings,
+        warning: Option<String>,
+        initial: Option<PathBuf>,
+    ) -> Self {
+        let tavern = tavern::detect(settings.tavern_dir.as_deref());
+        let image_root = settings.image_root();
         let mut app = Self {
             data: CardData::default(),
             path: None,
@@ -88,8 +105,13 @@ impl App {
                 "Open a character card, or drop a PNG / JSON onto the window"
             )
             .into(),
-            downloader: Downloader::new(cache_dir.clone(), 4, cc.egui_ctx.clone()),
-            cache_dir,
+            downloader: Downloader::new(4, cc.egui_ctx.clone()),
+            settings,
+            show_settings: false,
+            tavern,
+            gallery: None,
+            image_root,
+            image_dir: PathBuf::new(),
             refs: Vec::new(),
             states: HashMap::new(),
             thumb: 180.0,
@@ -107,6 +129,9 @@ impl App {
         };
         if let Some(p) = initial {
             app.open_path(&p);
+        }
+        if let Some(w) = warning {
+            app.status = w;
         }
         app
     }
@@ -191,6 +216,9 @@ impl App {
             }
         }
         self.dirty = false;
+        self.image_dir = images::card_dir(&self.image_root, &self.data.name);
+        self.states.clear();
+        self.gallery = None;
         self.rescan();
         self.refresh_raw();
     }
@@ -257,6 +285,7 @@ impl App {
                 self.path = Some(path.to_owned());
                 self.dirty = false;
                 self.status = trf!("已保存 {}", "Saved {}", path.display());
+                self.follow_rename();
             }
             Err(e) => self.status = trf!("保存失败：{e}", "Save failed: {e}"),
         }
@@ -308,16 +337,38 @@ impl App {
 
     // ---- 图片 ----
 
+    /// 重新扫描图片链接，并到卡片文件夹里查找已下载的文件（下载中的保持不变）。
     fn rescan(&mut self) {
         self.refs = images::scan_card(&self.data);
-        for r in &self.refs {
-            let known = matches!(self.states.get(&r.url), Some(DlState::Done(p)) if p.exists())
-                || matches!(self.states.get(&r.url), Some(DlState::Queued));
-            if !known {
-                let state = images::find_cached(&self.cache_dir, &r.url).map_or(DlState::Missing, DlState::Done);
-                self.states.insert(r.url.clone(), state);
+        for (url, state) in images::lookup(&self.image_dir, &self.refs) {
+            if self.states.get(&url) != Some(&DlState::Queued) {
+                self.states.insert(url, state);
             }
         }
+    }
+
+    /// 保存后角色名变了：图片文件夹跟着改名。新名字的文件夹已存在、或还有下载在进行时只切换不搬移，
+    /// 缺的图片之后会从图片库里复制过来。
+    fn follow_rename(&mut self) {
+        let new_dir = images::card_dir(&self.image_root, &self.data.name);
+        if new_dir == self.image_dir {
+            return;
+        }
+        let busy = self.states.values().any(|s| *s == DlState::Queued);
+        if !busy {
+            match images::move_card_dir(&self.image_dir, &new_dir) {
+                Ok(true) => {
+                    self.status += &trf!("；图片文件夹已改名为 {}", "; image folder renamed to {}", new_dir.display());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    self.status += &trf!("；图片文件夹改名失败：{e}", "; could not rename the image folder: {e}");
+                }
+            }
+        }
+        self.image_dir = new_dir;
+        self.states.clear();
+        self.rescan();
     }
 
     fn state(&self, url: &str) -> &DlState {
@@ -326,7 +377,7 @@ impl App {
 
     fn queue(&mut self, url: &str) {
         self.states.insert(url.to_owned(), DlState::Queued);
-        self.downloader.enqueue(url);
+        self.downloader.enqueue(&self.image_root, &self.image_dir, url);
     }
 
     fn download_all(&mut self) {
@@ -355,11 +406,45 @@ impl App {
         c
     }
 
-    fn export_images(&mut self, dir: &Path) {
-        self.status = match images::export_to(dir, &self.refs, &self.states) {
-            Ok(n) => trf!("已复制 {n} 张图片到 {}", "Copied {n} images to {}", dir.display()),
+    fn export_images(&mut self, dir: &Path, allowed_exts: Option<&[&str]>) {
+        self.status = match images::export_to(dir, &self.refs, &self.states, allowed_exts) {
+            Ok(r) => {
+                let mut msg = trf!("已复制 {} 张图片到 {}", "Copied {} images to {}", r.copied, dir.display());
+                if r.existing > 0 {
+                    msg += &trf!("；{} 张已存在，跳过", "; skipped {} already there", r.existing);
+                }
+                if r.unsupported > 0 {
+                    msg += &trf!("；{} 张格式不受支持", "; {} in unsupported formats", r.unsupported);
+                }
+                msg
+            }
             Err(e) => e,
         };
+    }
+
+    /// 当前卡片在酒馆里的 Gallery 目录（带缓存）。
+    fn gallery_target(&mut self) -> Option<GalleryTarget> {
+        let tavern = self.tavern.as_ref()?;
+        let user = self.tavern_user()?;
+        let user_dir = tavern.user_dir(&user);
+        let fresh = matches!(&self.gallery, Some((name, dir, _)) if *name == self.data.name && *dir == user_dir);
+        if !fresh {
+            let target = tavern.gallery_target(&user, &self.data.name);
+            self.gallery = Some((self.data.name.clone(), user_dir, target));
+        }
+        self.gallery.as_ref().and_then(|(_, _, t)| t.clone())
+    }
+
+    /// 设置里选的酒馆用户；不存在时用第一个。
+    fn tavern_user(&self) -> Option<String> {
+        let users = &self.tavern.as_ref()?.users;
+        self.settings.tavern_user.clone().filter(|u| users.contains(u)).or_else(|| users.first().cloned())
+    }
+
+    fn save_settings(&mut self) {
+        if let Err(e) = self.settings.save() {
+            self.status = trf!("保存设置失败：{e}", "Failed to save settings: {e}");
+        }
     }
 
     fn refresh_raw(&mut self) {
@@ -430,6 +515,9 @@ impl App {
                     self.export_json(true);
                 }
             });
+            if ui.button(tr!("⚙ 设置", "⚙ Settings")).clicked() {
+                self.show_settings = !self.show_settings;
+            }
             let mut lang = i18n::current();
             egui::ComboBox::from_id_salt("lang").selected_text(lang.label()).width(80.0).show_ui(ui, |ui| {
                 for l in Lang::ALL {
@@ -438,7 +526,8 @@ impl App {
             });
             if lang != i18n::current() {
                 i18n::set(lang);
-                i18n::save(lang);
+                self.settings.lang = Some(lang.code().to_owned());
+                self.save_settings();
             }
             ui.separator();
             let path =
@@ -452,8 +541,8 @@ impl App {
             let (done, queued, failed) = self.image_counts();
             ui.label(
                 RichText::new(trf!(
-                    "图片 {}：已缓存 {done} / 下载中 {queued} / 失败 {failed}",
-                    "Images {}: cached {done} / downloading {queued} / failed {failed}",
+                    "图片 {}：已下载 {done} / 下载中 {queued} / 失败 {failed}",
+                    "Images {}: downloaded {done} / downloading {queued} / failed {failed}",
                     self.refs.len()
                 ))
                 .weak(),
@@ -540,6 +629,7 @@ impl App {
                 ui.selectable_value(&mut self.tab, tab, label);
             }
             if self.tab != before {
+                self.gallery = None; // 酒馆那边可能有变化（导入了角色、改了 Gallery 文件夹）
                 // 离开编辑页时重新扫描，进入 JSON 页时重新生成
                 self.rescan();
                 if self.tab == Tab::Raw {
@@ -797,11 +887,13 @@ impl App {
     fn images_tab(&mut self, ui: &mut egui::Ui) {
         let (done, queued, failed) = self.image_counts();
         let missing = self.refs.len() - done - queued;
-        let gallery = images::tavern_gallery_dir(&self.data.name);
+        let gallery = self.gallery_target();
+        let card_dir = self.image_dir.clone();
         let model_imgs: usize = images::MODEL_FIELDS.iter().map(|f| self.images_in(f)).sum();
 
         ui.horizontal_wrapped(|ui| {
             if ui.button(tr!("🔄 重新扫描", "🔄 Rescan")).clicked() {
+                self.gallery = None;
                 self.rescan();
             }
             if ui
@@ -817,19 +909,49 @@ impl App {
                 && let Some(dir) =
                     rfd::FileDialog::new().set_title(tr!("选择导出目录", "Choose export folder")).pick_folder()
             {
-                self.export_images(&dir);
+                self.export_images(&dir, None);
             }
-            let tip = gallery.as_ref().map_or(
-                tr!("没有找到 ~/SillyTavern，或角色名为空", "~/SillyTavern not found, or the card has no name").into(),
-                |p| p.display().to_string(),
-            );
+            let tip = match (&self.tavern, &gallery) {
+                (None, _) => {
+                    tr!("没有找到酒馆，请在设置里指定酒馆目录", "SillyTavern not found; set its folder in Settings")
+                        .to_owned()
+                }
+                (Some(_), None) => tr!(
+                    "角色名为空，或清理非法字符后不能用作文件夹名",
+                    "The card name is empty, or not usable as a folder name once illegal characters are removed"
+                )
+                .to_owned(),
+                (Some(_), Some(g)) => {
+                    let why = match g.source {
+                        FolderSource::Override => tr!(
+                            "这个角色在酒馆里设置了自定义 Gallery 文件夹",
+                            "This character has a custom gallery folder in SillyTavern"
+                        ),
+                        FolderSource::Character => {
+                            tr!(
+                                "酒馆里已有这个角色，使用角色名文件夹",
+                                "Character found in SillyTavern; using its name"
+                            )
+                        }
+                        FolderSource::NotImported => tr!(
+                            "酒馆里还没导入这个角色，先按角色名放好，导入后即可在 Gallery 看到",
+                            "Not imported into SillyTavern yet; images will show up in the gallery once it is"
+                        ),
+                    };
+                    format!("{}\n{why}", g.dir.display())
+                }
+            };
             let gallery_btn = egui::Button::new(tr!("导出到酒馆 Gallery", "Export to SillyTavern gallery"));
             if ui.add_enabled(done > 0 && gallery.is_some(), gallery_btn).on_hover_text(tip).clicked() {
-                self.export_images(&gallery.unwrap());
+                // 导出前重新确认目标，提示里显示的可能已经过时
+                self.gallery = None;
+                if let Some(g) = self.gallery_target() {
+                    self.export_images(&g.dir, Some(&tavern::GALLERY_EXTS));
+                }
             }
-            if ui.button(tr!("打开缓存目录", "Open cache folder")).clicked() {
-                let _ = std::fs::create_dir_all(&self.cache_dir);
-                open_external(&self.cache_dir);
+            let open = egui::Button::new(tr!("打开图片文件夹", "Open image folder"));
+            if ui.add_enabled(card_dir.is_dir(), open).on_hover_text(card_dir.display().to_string()).clicked() {
+                open_external(&card_dir);
             }
             let btn = ui
                 .add_enabled(
@@ -859,10 +981,10 @@ impl App {
         });
         ui.label(
             RichText::new(trf!(
-                "共 {} 个链接，已缓存 {done}，下载中 {queued}，失败 {failed}。缓存目录：{}",
-                "{} links: {done} cached, {queued} downloading, {failed} failed. Cache: {}",
+                "共 {} 个链接，已下载 {done}，下载中 {queued}，失败 {failed}。图片文件夹：{}",
+                "{} links: {done} downloaded, {queued} downloading, {failed} failed. Folder: {}",
                 self.refs.len(),
-                self.cache_dir.display()
+                card_dir.display()
             ))
             .weak()
             .small(),
@@ -1071,6 +1193,133 @@ impl App {
         }
     }
 
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.show_settings {
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new(tr!("设置", "Settings"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(560.0)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.heading(tr!("图片库", "Image library"));
+                ui.label(
+                    RichText::new(tr!(
+                        "每张卡的图片放在以角色名命名的子文件夹里。",
+                        "Each card's images are stored in a subfolder named after the character."
+                    ))
+                    .weak(),
+                );
+                let root = self.image_root.clone();
+                ui.label(RichText::new(root.display().to_string()).monospace());
+                ui.horizontal(|ui| {
+                    if ui.button(tr!("更改…", "Change…")).clicked()
+                        && let Some(dir) = rfd::FileDialog::new()
+                            .set_title(tr!("选择图片库目录", "Choose image library folder"))
+                            .pick_folder()
+                    {
+                        self.settings.image_dir = Some(dir);
+                        changed = true;
+                    }
+                    let reset = egui::Button::new(tr!("恢复默认", "Reset to default"));
+                    if ui.add_enabled(self.settings.image_dir.is_some(), reset).clicked() {
+                        self.settings.image_dir = None;
+                        changed = true;
+                    }
+                    if ui.add_enabled(root.is_dir(), egui::Button::new(tr!("打开", "Open"))).clicked() {
+                        open_external(&root);
+                    }
+                });
+
+                ui.separator();
+                ui.heading("SillyTavern");
+                match &self.tavern {
+                    Some(t) => {
+                        ui.label(trf!("数据目录：{}", "Data folder: {}", t.data_root.display()));
+                    }
+                    None => {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            tr!(
+                                "没有找到酒馆。请选择酒馆的安装目录（含 config.yaml）或数据目录。",
+                                "SillyTavern not found. Choose its install folder (the one with config.yaml) \
+                                 or its data folder."
+                            ),
+                        );
+                    }
+                }
+                let how = if self.settings.tavern_dir.is_some() {
+                    tr!("手动指定", "Set manually")
+                } else {
+                    tr!(
+                        "自动检测：SILLYTAVERN_DATAROOT、~/SillyTavern、全局安装位置等",
+                        "Auto-detected: SILLYTAVERN_DATAROOT, ~/SillyTavern, the global install location, …"
+                    )
+                };
+                ui.label(RichText::new(how).weak().small());
+                ui.horizontal(|ui| {
+                    if ui.button(tr!("选择目录…", "Choose folder…")).clicked()
+                        && let Some(dir) = rfd::FileDialog::new()
+                            .set_title(tr!("选择酒馆目录", "Choose SillyTavern folder"))
+                            .pick_folder()
+                    {
+                        match tavern::resolve(&dir) {
+                            Some(t) => {
+                                self.tavern = Some(t);
+                                self.settings.tavern_dir = Some(dir);
+                                changed = true;
+                            }
+                            None => {
+                                self.status = tr!(
+                                    "这个目录里没有找到酒馆的数据（characters 或 user/images）",
+                                    "No SillyTavern data (characters or user/images) found in that folder"
+                                )
+                                .into();
+                            }
+                        }
+                    }
+                    let auto = egui::Button::new(tr!("自动检测", "Auto-detect"));
+                    if ui.add_enabled(self.settings.tavern_dir.is_some(), auto).clicked() {
+                        self.settings.tavern_dir = None;
+                        self.tavern = tavern::detect(None);
+                        changed = true;
+                    }
+                });
+                let users = self.tavern.as_ref().map(|t| t.users.clone()).unwrap_or_default();
+                if users.len() > 1 {
+                    let mut user = self.tavern_user().unwrap_or_default();
+                    egui::ComboBox::from_label(tr!("导出到哪个酒馆用户", "SillyTavern user to export to"))
+                        .selected_text(&user)
+                        .show_ui(ui, |ui| {
+                            for u in &users {
+                                ui.selectable_value(&mut user, u.clone(), u);
+                            }
+                        });
+                    if self.settings.tavern_user.as_ref() != Some(&user) && self.tavern_user() != Some(user.clone()) {
+                        self.settings.tavern_user = Some(user);
+                        changed = true;
+                    }
+                }
+            });
+        self.show_settings = open;
+        if changed {
+            self.gallery = None;
+            let root = self.settings.image_root();
+            if root != self.image_root {
+                self.image_root = root;
+                self.image_dir = images::card_dir(&self.image_root, &self.data.name);
+                self.states.clear();
+                self.rescan();
+            }
+            self.save_settings();
+        }
+    }
+
     fn preview_window(&mut self, ctx: &egui::Context) {
         let Some(path) = self.preview.clone() else { return };
         let screen = ctx.content_rect().size();
@@ -1088,12 +1337,12 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if self.downloader.poll(&mut self.states) > 0 {
+        if self.downloader.poll(&self.image_dir, &mut self.states) > 0 {
             let (done, queued, failed) = self.image_counts();
             if queued == 0 {
                 self.status = trf!(
-                    "下载完成：已缓存 {done}，失败 {failed}",
-                    "Downloads finished: {done} cached, {failed} failed"
+                    "下载完成：已下载 {done}，失败 {failed}",
+                    "Downloads finished: {done} downloaded, {failed} failed"
                 );
             }
         }
@@ -1126,6 +1375,7 @@ impl eframe::App for App {
         });
         self.pending_modal(&ctx);
         self.preview_window(&ctx);
+        self.settings_window(&ctx);
 
         let name = if self.data.name.is_empty() { tr!("未命名", "Untitled") } else { &self.data.name };
         let title = format!("{}{name} — Card Forge", if self.dirty { "● " } else { "" });
