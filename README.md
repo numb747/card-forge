@@ -28,6 +28,13 @@ cargo build --release
 
 The binary ends up at `target/release/card-forge`. Use `cargo install --path .` to install it into `~/.cargo/bin`.
 
+To add it to your desktop's app launcher after `cargo install` (make sure `~/.cargo/bin` is on the `PATH` your desktop session uses):
+
+```bash
+install -Dm644 assets/card-forge.desktop ~/.local/share/applications/card-forge.desktop
+install -Dm644 assets/icons/card-forge.svg ~/.local/share/icons/hicolor/scalable/apps/card-forge.svg
+```
+
 Linux notes:
 
 - File dialogs go through the XDG desktop portal (`xdg-desktop-portal` plus a backend for your desktop).

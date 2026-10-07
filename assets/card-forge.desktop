@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Card Forge
+GenericName=Character Card Editor
+GenericName[zh_CN]=角色卡编辑器
+Comment=Edit SillyTavern character cards and cache their images
+Comment[zh_CN]=编辑酒馆角色卡并缓存卡内图片
+Exec=card-forge %f
+Icon=card-forge
+Terminal=false
+Categories=Utility;
+Keywords=SillyTavern;Tavern;character;card;PNG;酒馆;角色卡;
+MimeType=image/png;application/json;
+StartupWMClass=card-forge

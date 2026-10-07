@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#40448a"/>
+      <stop offset="1" stop-color="#1d1f3d"/>
+    </linearGradient>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fdfcff"/>
+      <stop offset="1" stop-color="#e2def4"/>
+    </linearGradient>
+    <linearGradient id="portrait" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a284ff"/>
+      <stop offset="1" stop-color="#5a3dd4"/>
+    </linearGradient>
+    <linearGradient id="spark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffe7a0"/>
+      <stop offset="1" stop-color="#ff8a2b"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="url(#bg)"/>
+  <g transform="rotate(-8 256 256)">
+    <rect x="146" y="102" width="232" height="320" rx="28" fill="#000" opacity="0.28"/>
+    <rect x="136" y="88" width="232" height="320" rx="28" fill="url(#card)"/>
+    <rect x="160" y="112" width="184" height="200" rx="16" fill="url(#portrait)"/>
+    <circle cx="252" cy="184" r="38" fill="#f3efff"/>
+    <path d="M178 312 C178 260 212 236 252 236 C292 236 326 260 326 312 Z" fill="#f3efff"/>
+    <rect x="164" y="334" width="140" height="16" rx="8" fill="#b4add8"/>
+    <rect x="164" y="364" width="92" height="16" rx="8" fill="#cfc9e8"/>
+  </g>
+  <path d="M384 292 L404 358 L470 378 L404 398 L384 464 L364 398 L298 378 L364 358 Z" fill="url(#spark)"/>
+  <circle cx="452" cy="296" r="11" fill="#ffd36b"/>
+  <circle cx="314" cy="456" r="8" fill="#ffd36b"/>
+</svg>

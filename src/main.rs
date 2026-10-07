@@ -60,7 +60,10 @@ fn main() -> eframe::Result {
             .with_app_id("card-forge")
             .with_inner_size([1280.0, 840.0])
             .with_min_inner_size([900.0, 560.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/card-forge-256.png")).unwrap(),
+            ),
         ..Default::default()
     };
     eframe::run_native(

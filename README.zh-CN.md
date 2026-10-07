@@ -28,6 +28,13 @@ cargo build --release
 
 编译好的程序在 `target/release/card-forge`。用 `cargo install --path .` 可以安装到 `~/.cargo/bin`。
 
+`cargo install` 之后，执行下面两条命令可以把它加进桌面的应用启动器（桌面会话的 `PATH` 里要包含 `~/.cargo/bin`）：
+
+```bash
+install -Dm644 assets/card-forge.desktop ~/.local/share/applications/card-forge.desktop
+install -Dm644 assets/icons/card-forge.svg ~/.local/share/icons/hicolor/scalable/apps/card-forge.svg
+```
+
 Linux 说明：
 
 - 文件对话框通过 XDG 桌面门户实现，需要安装 `xdg-desktop-portal` 和对应桌面环境的后端。
